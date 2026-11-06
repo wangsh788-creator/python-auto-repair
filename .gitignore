@@ -20,3 +20,5 @@ codex-home/
 running.lock
 state-*.tmp
 connection-*.tmp
+settings.request
+settings-request-*.tmp

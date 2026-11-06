@@ -35,6 +35,16 @@ class SettingsTests(unittest.TestCase):
         self.window.state_dir = Path(self.temporary.name)
         self.window.root = Mock()
         self.window.busy = False
+        self.window.exiting = False
+        self.window.choosing_folder = False
+        self.window.visible = True
+        self.window.close_when_done = False
+        self.window.automatic_scan = False
+        self.window.activity = None
+        self.window.scan_idle_status = "就绪"
+        self.window.started_at = None
+        self.window.monitor = Mock()
+        self.window.exit_button = Mock()
         self.window.redact_values = ()
         self.window.mode = Value(app.MODE_LABELS["custom_api"])
         self.window.api_format = Value(app.FORMAT_LABELS["chat_completions"])
@@ -107,6 +117,102 @@ class SettingsTests(unittest.TestCase):
         settings.assert_called_once_with(self.window.state_dir.resolve())
         settings.return_value.run.assert_called_once()
         scan.assert_not_called()
+
+    def test_existing_folder_starts_resident_window_hidden(self):
+        with patch.object(app, "RunLock"):
+            with patch.object(app, "read_state", return_value={"folder": str(self.window.state_dir)}):
+                with patch.object(app, "SettingsWindow") as settings:
+                    with patch.object(app, "run_scan") as scan:
+                        result = app.main(["--state-dir", str(self.window.state_dir)])
+        self.assertEqual(result, 0)
+        settings.return_value.close.assert_called_once()
+        settings.return_value.run.assert_called_once()
+        scan.assert_not_called()
+
+    def test_headless_once_keeps_single_scan_without_window(self):
+        with patch.object(app, "RunLock"):
+            with patch.object(app, "read_state", return_value={"folder": str(self.window.state_dir)}):
+                with patch.object(app, "SettingsWindow") as settings:
+                    with patch.object(app, "run_scan", return_value={"failed": 0}) as scan:
+                        result = app.main(["--headless", "--once", "--state-dir", str(self.window.state_dir)])
+        self.assertEqual(result, 0)
+        settings.assert_not_called()
+        scan.assert_called_once_with(self.window.state_dir.resolve())
+
+    def test_duplicate_launch_requests_existing_resident_settings(self):
+        lock = Mock()
+        lock.__enter__ = Mock(side_effect=app.AlreadyRunning())
+        lock.__exit__ = Mock(return_value=False)
+        with patch.object(app, "RunLock", return_value=lock):
+            with patch.object(app, "request_settings") as request:
+                with patch.object(app, "SettingsWindow") as settings:
+                    result = app.main(["--settings", "--state-dir", str(self.window.state_dir)])
+        self.assertEqual(result, 0)
+        request.assert_called_once_with(self.window.state_dir.resolve())
+        settings.assert_not_called()
+
+    def test_closing_busy_window_keeps_background_work_alive(self):
+        self.window.busy = True
+        self.window.close()
+        self.window.root.withdraw.assert_called_once()
+        self.window.root.destroy.assert_not_called()
+        self.assertFalse(self.window.visible)
+        self.assertFalse(self.window.close_when_done)
+
+    def test_explicit_exit_waits_for_current_task_then_destroys_root(self):
+        self.window.busy = True
+        self.window.activity = "scan"
+        self.window.set_busy = Mock()
+        self.window.exit_background()
+        self.window.root.destroy.assert_not_called()
+        self.assertTrue(self.window.exiting)
+        self.assertTrue(self.window.close_when_done)
+        self.window.finish("result", {"detected": 1, "checked": 1, "fixed": 1, "failed": 0})
+        self.window.root.destroy.assert_called_once()
+        self.window.monitor.finish.assert_called_once_with(failed=False)
+
+    def test_automatic_errors_update_status_without_popup(self):
+        self.window.activity = "scan"
+        self.window.automatic_scan = True
+        self.window.set_busy = Mock()
+        with patch.object(app.messagebox, "showerror") as dialog:
+            self.window.finish("error", "offline")
+        self.assertIn("offline", self.window.status.get())
+        self.window.monitor.finish.assert_called_once_with(failed=True)
+        dialog.assert_not_called()
+
+    def test_idle_probe_does_not_cancel_failure_backoff(self):
+        self.window.activity = "scan"
+        self.window.automatic_scan = True
+        self.window.set_busy = Mock()
+        self.window.finish("monitor_idle", None)
+        self.window.monitor.finish.assert_not_called()
+        self.assertEqual(self.window.status.get(), "就绪")
+
+    def test_monitor_tick_starts_only_when_idle_and_due(self):
+        self.window.monitor.due.return_value = True
+        self.window.begin_scan = Mock()
+        self.window.monitor_tick()
+        self.window.begin_scan.assert_called_once_with(automatic=True)
+        self.window.root.after.assert_called_once_with(250, self.window.monitor_tick)
+        self.window.begin_scan.reset_mock()
+        self.window.busy = True
+        self.window.monitor_tick()
+        self.window.begin_scan.assert_not_called()
+
+    def test_folder_selection_pauses_background_monitor_until_dialog_closes(self):
+        self.window.begin_scan = Mock()
+        self.window.monitor.due.return_value = True
+
+        def select_folder(**_):
+            self.assertTrue(self.window.choosing_folder)
+            self.window.monitor_tick()
+            self.window.begin_scan.assert_not_called()
+            return ""
+
+        with patch.object(app.filedialog, "askdirectory", side_effect=select_folder):
+            self.window.choose()
+        self.assertFalse(self.window.choosing_folder)
 
 
 if __name__ == "__main__":

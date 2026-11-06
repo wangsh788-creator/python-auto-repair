@@ -29,6 +29,7 @@ from core import (
     read_state,
     run_scan,
 )
+from monitor import FolderMonitor, consume_settings_request, request_settings
 
 
 MODE_LABELS = {
@@ -84,6 +85,12 @@ class SettingsWindow:
         self.events = queue.Queue()
         self.busy = False
         self.close_when_done = False
+        self.visible = True
+        self.exiting = False
+        self.choosing_folder = False
+        self.automatic_scan = False
+        self.scan_idle_status = ""
+        self.monitor = FolderMonitor(state_dir)
         self.corrupt_state = False
         self.started_at = None
         self.progress_event = {}
@@ -144,9 +151,11 @@ class SettingsWindow:
         )
         self.scan_button = ttk.Button(scan_panel, text="检查新增及变化文件", command=self.scan)
         self.scan_button.grid(row=5, column=0, sticky="w")
+        self.exit_button = ttk.Button(scan_panel, text="退出后台", command=self.exit_background)
+        self.exit_button.grid(row=5, column=1, sticky="e")
         ttk.Label(
             scan_panel,
-            text="首次选择文件夹会记录现有文件。之后每次启动检查一轮，新增文件或修改内容后可再次检查。",
+            text="每 2 秒持续检测新增及变化文件。关闭此窗口后继续后台运行；再次双击程序可打开设置，停止运行请点“退出后台”。",
             wraplength=610,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(16, 0))
         scan_panel.columnconfigure(0, weight=1)
@@ -186,6 +195,7 @@ class SettingsWindow:
         self.mode_changed()
         self.refresh_connection_status()
         self.root.after(120, self.poll)
+        self.root.after(0, self.monitor_tick)
 
     def selected_mode(self):
         return next((mode for mode, label in MODE_LABELS.items() if label == self.mode.get()), "chatgpt")
@@ -248,6 +258,7 @@ class SettingsWindow:
             messagebox.showerror("连接设置未保存", detail, parent=self.root)
             return False
         self.api_key.set("")
+        self.monitor.invalidate()
         self.mode_changed()
         self.refresh_connection_status()
         if announce:
@@ -303,7 +314,11 @@ class SettingsWindow:
         options = {"parent": self.root, "title": "选择要检查的 Python 文件夹", "mustexist": True}
         if initial and Path(initial).is_dir():
             options["initialdir"] = initial
-        selected = filedialog.askdirectory(**options)
+        self.choosing_folder = True
+        try:
+            selected = filedialog.askdirectory(**options)
+        finally:
+            self.choosing_folder = False
         if not selected:
             return
         try:
@@ -323,6 +338,7 @@ class SettingsWindow:
             return
         self.corrupt_state = False
         self.folder.set(state["folder"])
+        self.monitor.invalidate()
         self.status.set("已记录现有文件，损坏记录已备份。" if recovering else "已记录现有文件，后续将检查新增或内容变化的文件。")
 
     def scan(self):
@@ -334,12 +350,29 @@ class SettingsWindow:
             return
         if not self.save_current_connection():
             return
+        self.begin_scan(automatic=False)
+
+    def begin_scan(self, automatic):
+        if self.busy or self.exiting:
+            return
+        self.automatic_scan = automatic
+        self.scan_idle_status = self.status.get()
         self.set_busy("scan")
         self.progress_event = {"stage": "scanning"}
-        self.render_progress()
-        threading.Thread(target=self.worker, daemon=True).start()
+        if not automatic:
+            self.render_progress()
+        threading.Thread(target=self.worker, args=(automatic,), daemon=True).start()
 
-    def worker(self):
+    def worker(self, automatic=False):
+        try:
+            if not self.monitor.begin(automatic=automatic):
+                self.events.put(("monitor_idle", None))
+                return
+        except Exception as exc:
+            detail = self.error_text(exc)
+            log_error(self.state_dir, detail)
+            self.events.put(("error", detail))
+            return
         try:
             ensure_connection(self.state_dir, cli_resolver=find_codex)
         except Exception as exc:
@@ -380,8 +413,15 @@ class SettingsWindow:
         self.status.set(f"{message}\n已用时 {self.elapsed_text()}{waiting}")
 
     def finish(self, kind, payload):
+        automatic = self.activity == "scan" and self.automatic_scan
+        if self.activity == "scan" and kind != "monitor_idle":
+            failed = kind in {"error", "connection_error"} or (kind == "result" and bool(payload.get("failed", 0)))
+            self.monitor.finish(failed=failed)
+        show_error = self.visible and not self.close_when_done and not automatic
         self.set_busy(None)
-        if kind == "connection_result":
+        if kind == "monitor_idle":
+            self.status.set(self.scan_idle_status)
+        elif kind == "connection_result":
             try:
                 self.saved_connection = read_connection(self.state_dir)
             except Exception:
@@ -392,7 +432,7 @@ class SettingsWindow:
         elif kind == "connection_error":
             detail = self.error_text(payload)
             self.status.set(f"连接未完成：{detail}\n已用时 {self.elapsed_text()}")
-            if not self.close_when_done:
+            if show_error:
                 self.notebook.select(1)
                 messagebox.showerror("连接未完成", detail, parent=self.root)
         elif kind == "result":
@@ -406,7 +446,7 @@ class SettingsWindow:
             if payload.get("failed", 0):
                 detail = self.error_text(errors[0]) if errors else "未获得具体错误信息，请重新检查。"
                 self.status.set(f"{summary}\n{detail}\n已用时 {self.elapsed_text()}")
-                if not self.close_when_done:
+                if show_error:
                     messagebox.showerror("检查未完成", detail, parent=self.root)
             elif not payload.get("detected", 0):
                 self.status.set(f"没有新增或内容变化的 .py 文件。已记录且未变化的文件会跳过。\n已用时 {self.elapsed_text()}")
@@ -417,12 +457,14 @@ class SettingsWindow:
         else:
             detail = self.error_text(payload)
             self.status.set(f"检查失败：{detail}\n已用时 {self.elapsed_text()}")
-            if not self.close_when_done:
+            if show_error:
                 messagebox.showerror("检查失败", detail, parent=self.root)
         if self.close_when_done:
             self.root.destroy()
 
     def poll(self):
+        if consume_settings_request(self.state_dir) and not self.exiting:
+            self.show()
         while True:
             try:
                 kind, payload = self.events.get_nowait()
@@ -443,11 +485,29 @@ class SettingsWindow:
         self.root.after(120, self.poll)
 
     def close(self):
+        self.visible = False
+        self.root.withdraw()
+
+    def show(self):
+        self.visible = True
+        self.root.deiconify()
+        self.root.lift()
+
+    def exit_background(self):
+        self.exiting = True
+        self.exit_button.configure(state="disabled")
         if self.busy:
             self.close_when_done = True
-            self.root.withdraw()
+            self.status.set("正在等待当前任务完成，完成后将退出后台。")
         else:
             self.root.destroy()
+
+    def monitor_tick(self):
+        if self.exiting:
+            return
+        if not self.busy and not self.choosing_folder and self.folder.get() and self.monitor.due():
+            self.begin_scan(automatic=True)
+        self.root.after(250, self.monitor_tick)
 
     def run(self):
         self.root.mainloop()
@@ -457,28 +517,38 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="后台检查新增或内容变化的 Python 文件，保留文件名另存到桌面并用 VS Code 打开查看。")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--settings", action="store_true", help="打开设置窗口")
-    mode.add_argument("--headless", action="store_true", help="完全无窗口运行")
+    mode.add_argument("--headless", action="store_true", help="无窗口检查一轮后退出")
+    parser.add_argument("--once", action="store_true", help="检查一轮后退出，不常驻后台")
     parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.settings and args.once:
+        parser.error("--settings 不能与 --once 同时使用")
     state_dir = (args.state_dir or default_state_dir()).resolve()
     try:
         with RunLock(state_dir):
-            if args.settings:
-                SettingsWindow(state_dir).run()
-                return 0
-            state = read_state(state_dir)
+            try:
+                state = read_state(state_dir)
+            except RuntimeError:
+                if args.headless or args.once:
+                    raise
+                state = {}
             folder = state.get("folder")
-            if not folder or not Path(folder).is_dir():
-                if args.headless:
+            if args.headless or args.once:
+                if not folder or not Path(folder).is_dir():
                     log_error(state_dir, "尚未选择文件夹，或原文件夹不存在。")
                     return 2
-                SettingsWindow(state_dir).run()
-                return 0
-            result = run_scan(state_dir)
-            for error in result.get("errors", []):
-                log_error(state_dir, str(error))
-            return 1 if result.get("failed", 0) else 0
+                result = run_scan(state_dir)
+                for error in result.get("errors", []):
+                    log_error(state_dir, str(error))
+                return 1 if result.get("failed", 0) else 0
+            window = SettingsWindow(state_dir)
+            if not args.settings and folder and Path(folder).is_dir():
+                window.close()
+            window.run()
+            return 0
     except AlreadyRunning:
+        if not args.headless and not args.once:
+            request_settings(state_dir)
         return 0
     except Exception as exc:
         log_error(state_dir, traceback.format_exc())

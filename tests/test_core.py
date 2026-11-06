@@ -604,6 +604,10 @@ class EditorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
+        self.state_dir = Path(self.temporary.name) / "PythonAutoRepair"
+        state_directory = patch.object(core, "default_state_dir", return_value=self.state_dir)
+        state_directory.start()
+        self.addCleanup(state_directory.stop)
         self.source = Path(self.temporary.name) / "修复结果.py"
         self.source.write_text("value = 1\n", encoding="utf-8")
 
@@ -708,6 +712,7 @@ class EditorTests(unittest.TestCase):
         environment = {
             "ELECTRON_RUN_AS_NODE": "1",
             "VSCODE_IPC_HOOK_CLI": r"\\.\pipe\previous-session",
+            "VSCODE_PORTABLE": str(Path(self.temporary.name) / "portable-profile"),
             "UNRELATED_EDITOR_SETTING": "retained",
         }
         with patch.dict(core.os.environ, environment, clear=True):
@@ -718,8 +723,47 @@ class EditorTests(unittest.TestCase):
         child = popen.call_args.kwargs["env"]
         self.assertNotIn("ELECTRON_RUN_AS_NODE", child)
         self.assertNotIn("VSCODE_IPC_HOOK_CLI", child)
+        self.assertEqual(child["VSCODE_PORTABLE"], environment["VSCODE_PORTABLE"])
         self.assertEqual(child["UNRELATED_EDITOR_SETTING"], "retained")
         self.assertEqual(unchanged, environment)
+
+    def test_editor_launch_preserves_existing_profile_and_trust_settings(self):
+        editor = Path(self.temporary.name) / "Microsoft VS Code" / "Code.exe"
+        roaming = Path(self.temporary.name) / "Roaming"
+        settings = roaming / "Code" / "User" / "settings.json"
+        trusted_folders = settings.parent / "globalStorage" / "storage.json"
+        settings.parent.mkdir(parents=True)
+        trusted_folders.parent.mkdir()
+        settings_bytes = b'{"security.workspace.trust.enabled":true}\n'
+        folders_bytes = b'{"trustedFolders":[]}\n'
+        settings.write_bytes(settings_bytes)
+        trusted_folders.write_bytes(folders_bytes)
+        with patch.dict(core.os.environ, {"APPDATA": str(roaming)}):
+            with patch.object(core, "find_vscode", return_value=editor):
+                with patch.object(core.subprocess, "Popen") as popen:
+                    core.open_output(self.source)
+        arguments = popen.call_args.args[0]
+        self.assertNotIn("--user-data-dir", arguments)
+        self.assertNotIn("--disable-workspace-trust", arguments)
+        self.assertFalse(self.state_dir.exists())
+        self.assertNotIn(str(settings.parent), arguments)
+        self.assertEqual(settings.read_bytes(), settings_bytes)
+        self.assertEqual(trusted_folders.read_bytes(), folders_bytes)
+        self.assertEqual(self.source.name, "修复结果.py")
+
+    def test_portable_data_folder_is_preserved_when_opening_editor(self):
+        editor = Path(self.temporary.name) / "Portable VS Code" / "Code.exe"
+        portable_data = editor.parent / "data"
+        portable_data.mkdir(parents=True)
+        settings = portable_data / "settings.json"
+        original = b'{"security.workspace.trust.enabled":true}\n'
+        settings.write_bytes(original)
+        with patch.object(core, "find_vscode", return_value=editor):
+            with patch.object(core.subprocess, "Popen") as popen:
+                core.open_output(self.source)
+        popen.assert_called_once()
+        self.assertEqual(settings.read_bytes(), original)
+        self.assertEqual(sorted(path.name for path in portable_data.iterdir()), ["settings.json"])
 
     def test_configured_code_cmd_uses_sibling_native_executable(self):
         installation = Path(self.temporary.name) / "Portable VS Code"
