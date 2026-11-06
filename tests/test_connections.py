@@ -175,14 +175,15 @@ class LoginTests(unittest.TestCase):
             {"method": "account/login/completed", "params": {"success": True, "loginId": "login-for-test"}},
         ])
         statuses = []
-        with patch.object(connections, "_chrome", return_value=self.chrome):
+        with patch.dict(os.environ, {"EDGEWEBDRIVER": "unused-browser-driver"}), patch.object(connections, "_chrome", return_value=self.chrome):
             with patch.object(connections, "_external_process", side_effect=[server, Mock()]) as launch:
                 with patch.object(connections, "ensure_connection") as ensure:
                     result = connections.login_chatgpt(self.state_dir, lambda: self.cli, statuses.append)
         self.assertIn("登录成功", result)
         self.assertEqual(launch.call_count, 2)
         self.assertEqual(launch.call_args_list[1].args[0], [str(self.chrome), "--new-tab", auth_url])
-        self.assertNotIn("edge", repr(launch.call_args_list).lower())
+        executables = [Path(call.args[0][0]).name.lower() for call in launch.call_args_list]
+        self.assertEqual(executables, ["codex.exe", "chrome.exe"])
         self.assertEqual(launch.call_args_list[0].kwargs["env"]["CODEX_HOME"], str(self.state_dir / "codex-home"))
         sent = [json.loads(line) for line in server.stdin.recorded.splitlines()]
         self.assertEqual([message["method"] for message in sent], ["initialize", "initialized", "account/login/start"])
