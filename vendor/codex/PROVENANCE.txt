@@ -1,0 +1,15 @@
+OpenAI Codex CLI runtime
+Version reported by the bundled executable: codex-cli 0.166.0-alpha.6
+Executable SHA-256: 925C7D0665FFA49B0DCF748E034A805A04DA984164AC92301432073B47789B99
+Executable size: 371731248 bytes
+Runtime origin: unmodified native Codex CLI from the installed OpenAI Codex desktop runtime.
+Upstream project: https://github.com/openai/codex
+
+License and notice texts retrieved from the official upstream repository on 2026-11-06:
+LICENSE: https://github.com/openai/codex/blob/main/LICENSE
+LICENSE blob SHA: 4606e72e042564097e8780d66c1d4dcb611869bd
+NOTICE: https://github.com/openai/codex/blob/main/NOTICE
+NOTICE blob SHA: 2805899d56d0332d175cfc613c67d45d6f006db7
+
+The executable has not been modified. The runtime version identifies this bundled
+build; the upstream license and notice references identify the retrieved texts.
