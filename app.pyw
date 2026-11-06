@@ -65,7 +65,7 @@ def select_initial_folder(state_dir, missing=False):
         configure_folder(Path(selected), state_dir)
         messagebox.showinfo(
             "Python 自动修复",
-            "已记住文件夹及现有文件。\n以后启动会后台检查新增或内容变化的 .py 文件，修复结果保留文件名保存到桌面并自动用 PyCharm 打开查看。",
+            "已记住文件夹及现有文件。\n以后启动会后台检查新增或内容变化的 .py 文件，修复结果保留文件名保存到桌面并自动用 VS Code 打开查看。",
             parent=root,
         )
         return True
@@ -136,7 +136,7 @@ class SettingsWindow:
             text="包含子文件夹；检查新增或内容变化的 .py 文件是否实现开头注释中的目标。",
             wraplength=610,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 9))
-        ttk.Label(scan_panel, text=f"修复结果：{desktop_dir()}，保留原文件名并自动用 PyCharm 打开。", wraplength=610).grid(
+        ttk.Label(scan_panel, text=f"修复结果：{desktop_dir()}，保留原文件名并自动用 VS Code 打开。", wraplength=610).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(0, 13)
         )
         ttk.Label(scan_panel, textvariable=self.connection_status, wraplength=610).grid(
@@ -372,7 +372,7 @@ class SettingsWindow:
             "scanning": "正在检索文件夹……",
             "analyzing": f"正在分析 {filename}{position}",
             "saved": f"已保存 {filename}{position}",
-            "opening": f"正在用 PyCharm 打开 {filename}{position}",
+            "opening": f"正在用 VS Code 打开 {filename}{position}",
             "done": "正在汇总检查结果……",
         }
         message = labels.get(stage, "正在检查……")
@@ -454,7 +454,7 @@ class SettingsWindow:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="后台检查新增或内容变化的 Python 文件，保留文件名另存到桌面并用 PyCharm 打开查看。")
+    parser = argparse.ArgumentParser(description="后台检查新增或内容变化的 Python 文件，保留文件名另存到桌面并用 VS Code 打开查看。")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--settings", action="store_true", help="打开设置窗口")
     mode.add_argument("--headless", action="store_true", help="完全无窗口运行")

@@ -489,43 +489,80 @@ def _save_output(output_dir, filename, source):
     raise FileExistsError("无法创建保留原文件名的修复副本。")
 
 
-def find_pycharm():
-    override = os.environ.get("PY_AUTO_REPAIR_PYCHARM")
+def _vscode_native(path):
+    path = Path(path).expanduser()
+    if os.name != "nt":
+        return path.resolve() if path.is_file() else None
+    candidates = [path] if path.suffix.lower() == ".exe" else []
+    if path.name.lower() in {"code", "code.cmd", "code-insiders", "code-insiders.cmd"}:
+        base = path.parent.parent if path.parent.name.lower() == "bin" else path.parent
+        candidates.extend((base / "Code.exe", base / "Code - Insiders.exe"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _vscode_registry_candidates():
+    if os.name != "nt":
+        return []
+    import winreg
+    candidates = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            for name in ("Code.exe", "Code - Insiders.exe"):
+                try:
+                    key_path = "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + name
+                    with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
+                        value, _ = winreg.QueryValueEx(key, "")
+                    if isinstance(value, str) and value.strip():
+                        candidates.append(Path(os.path.expandvars(value.strip().strip('"'))))
+                except OSError:
+                    pass
+    return candidates
+
+
+def find_vscode():
+    override = os.environ.get("PY_AUTO_REPAIR_VSCODE")
     if override:
-        path = Path(override).expanduser()
-        if path.is_file() and (os.name != "nt" or path.suffix.lower() == ".exe"):
-            return path.resolve()
-        raise FileNotFoundError("PY_AUTO_REPAIR_PYCHARM 指定的 PyCharm 可执行文件不存在或无效。")
-    for name in (("pycharm64.exe", "pycharm.exe") if os.name == "nt" else ("pycharm", "pycharm.sh")):
+        candidate = _vscode_native(override)
+        if candidate is not None:
+            return candidate
+        raise FileNotFoundError("PY_AUTO_REPAIR_VSCODE 指定的 VS Code 可执行文件不存在或无效。")
+    commands = ("Code.exe", "code", "code.cmd", "code-insiders", "code-insiders.cmd") if os.name == "nt" else ("code", "code-insiders")
+    for name in commands:
         command = shutil.which(name)
-        if command and Path(command).is_file():
-            return Path(command).resolve()
+        if command:
+            candidate = _vscode_native(command)
+            if candidate is not None:
+                return candidate
     candidates = []
     if os.name == "nt":
         local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        roots = [Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "JetBrains",
-                 Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "JetBrains",
-                 local / "Programs", local / "Programs" / "JetBrains"]
+        roots = [local / "Programs", Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+                 Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))]
         for root in roots:
-            candidates.extend(root.glob("PyCharm*/bin/pycharm64.exe"))
-            candidates.extend(root.glob("PyCharm*/bin/pycharm.exe"))
-        toolbox = local / "JetBrains" / "Toolbox" / "apps"
-        if toolbox.is_dir():
-            candidates.extend(toolbox.glob("**/bin/pycharm64.exe"))
+            candidates.extend((root / "Microsoft VS Code" / "Code.exe",
+                               root / "Microsoft VS Code Insiders" / "Code - Insiders.exe"))
+        candidates.extend(_vscode_registry_candidates())
     elif sys.platform == "darwin":
-        candidates.extend(Path("/Applications").glob("PyCharm*.app/Contents/MacOS/pycharm"))
-        candidates.extend((Path.home() / "Applications").glob("PyCharm*.app/Contents/MacOS/pycharm"))
-    for candidate in sorted(candidates, key=lambda entry: entry.stat().st_mtime, reverse=True):
-        if candidate.is_file():
-            return candidate.resolve()
-    raise FileNotFoundError("未找到 PyCharm。请安装 PyCharm，或通过 PY_AUTO_REPAIR_PYCHARM 指定其可执行文件。")
+        for root in (Path("/Applications"), Path.home() / "Applications"):
+            candidates.append(root / "Visual Studio Code.app" / "Contents" / "MacOS" / "Electron")
+    for path in candidates:
+        candidate = _vscode_native(path)
+        if candidate is not None:
+            return candidate
+    raise FileNotFoundError("未找到 VS Code。请安装 Visual Studio Code，或通过 PY_AUTO_REPAIR_VSCODE 指定其可执行文件。")
 
 
 def open_output(path):
     path = Path(path).resolve(strict=True)
     if not path.is_file() or path.suffix.lower() != ".py":
         raise ValueError("只能打开已保存的 Python 修复文件。")
-    command = [str(find_pycharm()), "--line", "1", str(path)]
+    command = [str(find_vscode()), "--reuse-window", "--goto", str(path) + ":1:1"]
+    environment = os.environ.copy()
+    for key in ("ELECTRON_RUN_AS_NODE", "VSCODE_IPC_HOOK_CLI"):
+        environment.pop(key, None)
     options = {}
     if os.name == "nt":
         startup = subprocess.STARTUPINFO()
@@ -539,7 +576,7 @@ def open_output(path):
         previous_dll_path = buffer.value
         ctypes.windll.kernel32.SetDllDirectoryW(None)
     try:
-        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options)
+        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment, **options)
     finally:
         if previous_dll_path is not None:
             ctypes.windll.kernel32.SetDllDirectoryW(previous_dll_path or None)

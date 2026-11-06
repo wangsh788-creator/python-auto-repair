@@ -607,32 +607,32 @@ class EditorTests(unittest.TestCase):
         self.source = Path(self.temporary.name) / "修复结果.py"
         self.source.write_text("value = 1\n", encoding="utf-8")
 
-    def test_windows_launches_pycharm_directly_with_visible_window(self):
-        editor = Path(self.temporary.name) / "PyCharm Professional 2026.3" / "bin" / "pycharm64.exe"
-        with patch.object(core, "find_pycharm", return_value=editor):
+    def test_windows_launches_vscode_directly_with_visible_window(self):
+        editor = Path(self.temporary.name) / "Microsoft VS Code" / "Code.exe"
+        with patch.object(core, "find_vscode", return_value=editor):
             with patch.object(core.os, "startfile") as startfile:
                 with patch.object(core.subprocess, "Popen") as popen:
                     core.open_output(self.source)
         popen.assert_called_once()
         arguments = popen.call_args.args[0]
-        self.assertEqual(arguments, [str(editor), "--line", "1", str(self.source.resolve())])
+        self.assertEqual(arguments, [str(editor), "--reuse-window", "--goto", str(self.source.resolve()) + ":1:1"])
         self.assertFalse(popen.call_args.kwargs.get("shell", False))
         startfile.assert_not_called()
         startup = popen.call_args.kwargs["startupinfo"]
         self.assertTrue(startup.dwFlags & core.subprocess.STARTF_USESHOWWINDOW)
         self.assertEqual(startup.wShowWindow, 1)
 
-    def test_missing_pycharm_raises_without_launching_another_editor(self):
-        with patch.object(core, "find_pycharm", side_effect=FileNotFoundError("PyCharm unavailable")):
+    def test_missing_vscode_raises_without_launching_another_editor(self):
+        with patch.object(core, "find_vscode", side_effect=FileNotFoundError("VS Code unavailable")):
             with patch.object(core.os, "startfile") as startfile:
                 with patch.object(core.subprocess, "Popen") as popen:
-                    with self.assertRaisesRegex(FileNotFoundError, "PyCharm unavailable"):
+                    with self.assertRaisesRegex(FileNotFoundError, "VS Code unavailable"):
                         core.open_output(self.source)
         startfile.assert_not_called()
         popen.assert_not_called()
 
     def test_frozen_launch_restores_dll_directory_when_process_creation_fails(self):
-        editor = Path(self.temporary.name) / "PyCharm" / "bin" / "pycharm64.exe"
+        editor = Path(self.temporary.name) / "Microsoft VS Code" / "Code.exe"
         for previous in (r"C:\Frozen App\_internal", ""):
             with self.subTest(previous=previous):
                 events = []
@@ -655,7 +655,7 @@ class EditorTests(unittest.TestCase):
                     with patch.object(core.ctypes, "windll") as windll:
                         windll.kernel32.GetDllDirectoryW.side_effect = get_directory
                         windll.kernel32.SetDllDirectoryW.side_effect = set_directory
-                        with patch.object(core, "find_pycharm", return_value=editor):
+                        with patch.object(core, "find_vscode", return_value=editor):
                             with patch.object(core.subprocess, "Popen", side_effect=failed_launch):
                                 with self.assertRaisesRegex(OSError, "process creation failed"):
                                     core.open_output(self.source)
@@ -668,7 +668,7 @@ class EditorTests(unittest.TestCase):
     def discovery_environment(self, override):
         root = Path(self.temporary.name)
         return {
-            "PY_AUTO_REPAIR_PYCHARM": str(override),
+            **({"PY_AUTO_REPAIR_VSCODE": str(override)} if override is not None else {}),
             "ProgramFiles": str(root / "Program Files"),
             "ProgramFiles(x86)": str(root / "Program Files (x86)"),
             "ProgramW6432": str(root / "Program Files"),
@@ -677,31 +677,112 @@ class EditorTests(unittest.TestCase):
             "USERPROFILE": str(root),
         }
 
-    def test_configured_pycharm_native_executable_is_discovered(self):
-        editor = Path(self.temporary.name) / "PyCharm Test With Spaces" / "bin" / "pycharm64.exe"
+    def test_configured_vscode_native_executable_is_discovered(self):
+        editor = Path(self.temporary.name) / "Microsoft VS Code With Spaces" / "Code.exe"
         editor.parent.mkdir(parents=True)
         editor.write_bytes(b"not executed")
         with patch.dict(core.os.environ, self.discovery_environment(editor), clear=True):
             with patch.object(core.shutil, "which", return_value=None):
                 with patch.object(core.Path, "home", return_value=Path(self.temporary.name)):
-                    self.assertEqual(core.find_pycharm(), editor.resolve())
+                    self.assertEqual(core.find_vscode(), editor.resolve())
 
-    def test_batch_launcher_is_not_accepted_as_native_pycharm(self):
-        batch = Path(self.temporary.name) / "pycharm.bat"
+    def test_unknown_batch_launcher_is_not_accepted_as_native_vscode(self):
+        batch = Path(self.temporary.name) / "unknown-editor.bat"
         batch.write_text("@exit /b 0\n", encoding="utf-8")
         with patch.dict(core.os.environ, self.discovery_environment(batch), clear=True):
             with patch.object(core.shutil, "which", return_value=None):
                 with patch.object(core.Path, "home", return_value=Path(self.temporary.name)):
                     with self.assertRaises(FileNotFoundError):
-                        core.find_pycharm()
+                        core.find_vscode()
 
-    def test_missing_configured_pycharm_is_not_reported_as_installed(self):
-        missing = Path(self.temporary.name) / "missing" / "pycharm64.exe"
+    def test_missing_configured_vscode_is_not_reported_as_installed(self):
+        missing = Path(self.temporary.name) / "missing" / "Code.exe"
         with patch.dict(core.os.environ, self.discovery_environment(missing), clear=True):
             with patch.object(core.shutil, "which", return_value=None):
                 with patch.object(core.Path, "home", return_value=Path(self.temporary.name)):
                     with self.assertRaises(FileNotFoundError):
-                        core.find_pycharm()
+                        core.find_vscode()
+
+    def test_vscode_launch_clears_electron_and_stale_cli_hooks_only_in_child(self):
+        editor = Path(self.temporary.name) / "Microsoft VS Code" / "Code.exe"
+        environment = {
+            "ELECTRON_RUN_AS_NODE": "1",
+            "VSCODE_IPC_HOOK_CLI": r"\\.\pipe\previous-session",
+            "UNRELATED_EDITOR_SETTING": "retained",
+        }
+        with patch.dict(core.os.environ, environment, clear=True):
+            with patch.object(core, "find_vscode", return_value=editor):
+                with patch.object(core.subprocess, "Popen") as popen:
+                    core.open_output(self.source)
+            unchanged = dict(core.os.environ)
+        child = popen.call_args.kwargs["env"]
+        self.assertNotIn("ELECTRON_RUN_AS_NODE", child)
+        self.assertNotIn("VSCODE_IPC_HOOK_CLI", child)
+        self.assertEqual(child["UNRELATED_EDITOR_SETTING"], "retained")
+        self.assertEqual(unchanged, environment)
+
+    def test_configured_code_cmd_uses_sibling_native_executable(self):
+        installation = Path(self.temporary.name) / "Portable VS Code"
+        editor = installation / "Code.exe"
+        shim = installation / "bin" / "code.cmd"
+        shim.parent.mkdir(parents=True)
+        editor.write_bytes(b"not executed")
+        shim.write_text("@exit /b 0\n", encoding="utf-8")
+        with patch.dict(core.os.environ, self.discovery_environment(shim), clear=True):
+            with patch.object(core.shutil, "which", return_value=None):
+                self.assertEqual(core.find_vscode(), editor.resolve())
+
+    def test_code_cmd_without_native_executable_is_rejected(self):
+        shim = Path(self.temporary.name) / "Incomplete VS Code" / "bin" / "code.cmd"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("@exit /b 0\n", encoding="utf-8")
+        with patch.dict(core.os.environ, self.discovery_environment(shim), clear=True):
+            with patch.object(core.shutil, "which", return_value=None):
+                with self.assertRaises(FileNotFoundError):
+                    core.find_vscode()
+
+    def test_path_code_cmd_resolves_native_executable(self):
+        installation = Path(self.temporary.name) / "PATH VS Code"
+        editor = installation / "Code.exe"
+        shim = installation / "bin" / "code.cmd"
+        shim.parent.mkdir(parents=True)
+        editor.write_bytes(b"not executed")
+        shim.write_text("@exit /b 0\n", encoding="utf-8")
+
+        def which(name):
+            return str(shim) if name.lower() in {"code", "code.cmd"} else None
+
+        with patch.dict(core.os.environ, self.discovery_environment(None), clear=True):
+            with patch.object(core.shutil, "which", side_effect=which):
+                self.assertEqual(core.find_vscode(), editor.resolve())
+
+    def test_standard_user_installation_is_discovered_without_path(self):
+        environment = self.discovery_environment(None)
+        editor = Path(environment["LOCALAPPDATA"]) / "Programs" / "Microsoft VS Code" / "Code.exe"
+        editor.parent.mkdir(parents=True)
+        editor.write_bytes(b"not executed")
+        with patch.dict(core.os.environ, environment, clear=True):
+            with patch.object(core.shutil, "which", return_value=None):
+                self.assertEqual(core.find_vscode(), editor.resolve())
+
+    def test_standard_system_installation_is_discovered_without_path(self):
+        environment = self.discovery_environment(None)
+        editor = Path(environment["ProgramFiles"]) / "Microsoft VS Code" / "Code.exe"
+        editor.parent.mkdir(parents=True)
+        editor.write_bytes(b"not executed")
+        with patch.dict(core.os.environ, environment, clear=True):
+            with patch.object(core.shutil, "which", return_value=None):
+                self.assertEqual(core.find_vscode(), editor.resolve())
+
+    def test_registry_finds_nonstandard_installation_without_path(self):
+        editor = Path(self.temporary.name) / "Custom Applications" / "VS Code" / "Code.exe"
+        editor.parent.mkdir(parents=True)
+        editor.write_bytes(b"not executed")
+        with patch.dict(core.os.environ, self.discovery_environment(None), clear=True):
+            with patch.object(core.shutil, "which", return_value=None):
+                with patch.object(core, "_vscode_registry_candidates", return_value=[editor]) as registry:
+                    self.assertEqual(core.find_vscode(), editor.resolve())
+        registry.assert_called_once()
 
 
 if __name__ == "__main__":
